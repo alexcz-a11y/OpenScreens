@@ -1,0 +1,89 @@
+name: Build OpenScreens iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git tag, branch, or commit SHA to build"
+        required: true
+        default: "v1.3.0"
+        type: string
+
+jobs:
+  build-ios-ipa:
+    name: Build Unsigned iOS IPA
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - name: Checkout OpenScreens
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || 'v1.3.0' }}
+
+      - name: Verify checked-out ref
+        run: |
+          git rev-parse HEAD
+          git describe --tags --always
+
+      - name: Select Xcode 27.2
+        run: |
+          if [ -d "/Applications/Xcode_27.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_27.2.app
+          else
+            ls -la /Applications/Xcode*.app
+          fi
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Archive unsigned OpenScreens iOS
+        run: |
+          xcodebuild archive \
+            -project OpenScreens.xcodeproj \
+            -scheme "OpenScreens iOS" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$PWD/build/OpenScreens.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS=""
+
+      - name: Package and verify unsigned IPA
+        run: |
+          APP_PATH=$(find "$PWD/build/OpenScreens.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" | head -n 1)
+          echo "Found app bundle: $APP_PATH"
+          test -n "$APP_PATH"
+
+          # Ensure clean unsigned state for enterprise re-signing
+          rm -rf "$APP_PATH/_CodeSignature" "$APP_PATH/embedded.mobileprovision"
+
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Info.plist")
+          BUILD_NUM=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PATH/Info.plist")
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")
+          EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+          MIN_OS=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP_PATH/Info.plist")
+
+          echo "App Version: $VERSION ($BUILD_NUM)"
+          echo "Bundle ID:   $BUNDLE_ID"
+          echo "Min iOS:     $MIN_OS"
+          lipo -info "$APP_PATH/$EXEC_NAME"
+          file "$APP_PATH/$EXEC_NAME"
+          codesign -dv --entitlements - "$APP_PATH" 2>&1 || true
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+
+          IPA_NAME="OpenScreens-${VERSION}-iOS-unsigned.ipa"
+          zip -r -y "$IPA_NAME" Payload
+          ls -lh "$IPA_NAME"
+          shasum -a 256 "$IPA_NAME"
+          echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenScreens-1.3.0-iOS-unsigned
+          path: ${{ env.IPA_NAME }}
+          retention-days: 30
